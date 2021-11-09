@@ -3,6 +3,8 @@
 #include <Drivers/STM32/stm32_system.h>
 #include <bitset>
 
+uint8_t test_hall_state_fail = 0;
+
 Encoder::Encoder(TIM_HandleTypeDef* timer, Stm32Gpio index_gpio,
                  Stm32Gpio hallA_gpio, Stm32Gpio hallB_gpio, Stm32Gpio hallC_gpio,
                  Stm32SpiArbiter* spi_arbiter) :
@@ -22,7 +24,7 @@ bool Encoder::apply_config(ODriveIntf::MotorIntf::MotorType motor_type) {
     update_pll_gains();
 
     if (config_.pre_calibrated) {
-        if (config_.mode == Encoder::MODE_HALL && config_.hall_polarity_calibrated)
+        if ( (config_.mode == Encoder::MODE_HALL || config_.mode == Encoder::MODE_INC_PLUS_HALL) && config_.hall_polarity_calibrated)
             is_ready_ = true;
         if (config_.mode == Encoder::MODE_SINCOS)
             is_ready_ = true;
@@ -63,6 +65,13 @@ void Encoder::setup() {
         if (axis_->controller_.config_.anticogging.pre_calibrated) {
             axis_->controller_.anticogging_valid_ = true;
         }
+    }
+
+    if (mode_ & MODE_HALL)
+    {
+        hallA_gpio_.config(GPIO_MODE_INPUT, GPIO_PULLUP);
+        hallB_gpio_.config(GPIO_MODE_INPUT, GPIO_PULLUP);
+        hallC_gpio_.config(GPIO_MODE_INPUT, GPIO_PULLUP);
     }
 }
 
@@ -236,6 +245,7 @@ bool Encoder::run_hall_polarity_calibration() {
         }
         if (!(state_seen == state_confirmed)) {
             set_error(ERROR_ILLEGAL_HALL_STATE);
+            test_hall_state_fail = 1;
             return false;
         }
 
@@ -258,6 +268,7 @@ bool Encoder::run_hall_polarity_calibration() {
             hall_polarity = 0b100;
         } else {
             set_error(ERROR_ILLEGAL_HALL_STATE);
+            test_hall_state_fail = 2;
             return false;
         }
         config_.hall_polarity = hall_polarity;
@@ -324,6 +335,7 @@ bool Encoder::run_hall_phase_calibration() {
 // @brief Turns the motor in one direction for a bit and then in the other
 // direction in order to find the offset between the electrical phase 0
 // and the encoder state 0.
+
 bool Encoder::run_offset_calibration() {
     const float start_lock_duration = 1.0f;
 
@@ -333,7 +345,7 @@ bool Encoder::run_offset_calibration() {
         return false;
     }
 
-    if (config_.mode == MODE_HALL && !config_.hall_polarity_calibrated) {
+    if ( (config_.mode == MODE_HALL || config_.mode == MODE_INC_PLUS_HALL) && !config_.hall_polarity_calibrated) {
         set_error(ERROR_HALL_NOT_CALIBRATED_YET);
         return false;
     }
@@ -396,7 +408,19 @@ bool Encoder::run_offset_calibration() {
         axis_->open_loop_controller_.total_distance_ = 0.0f;
     }
 
+    if (mode_ == MODE_INC_PLUS_HALL)
+    {
+        hall_edge_up_first_enc_cnt_.fill(0);
+        hall_edge_down_first_enc_cnt_.fill(0);
+        hall_edge_up_enc_cnt_.fill(0);
+        hall_edge_down_enc_cnt_.fill(0);
+        hall_edge_up_sample_cnt_.fill(0);
+        hall_edge_down_sample_cnt_.fill(0);
+        enc_hall_calib_err_count_ = 0;
+    }
+
     // scan forward
+    forward_calib_flag_ = true;
     while ((axis_->requested_state_ == Axis::AXIS_STATE_UNDEFINED) && axis_->motor_.is_armed_) {
         bool reached_target_dist = axis_->open_loop_controller_.total_distance_.any().value_or(-INFINITY) >= config_.calib_scan_distance;
         if (reached_target_dist) {
@@ -406,6 +430,7 @@ bool Encoder::run_offset_calibration() {
         num_steps++;
         osDelay(1);
     }
+    forward_calib_flag_ = false;
 
     // Check response and direction
     if (shadow_count_ > init_enc_val + 8) {
@@ -436,6 +461,7 @@ bool Encoder::run_offset_calibration() {
     }
 
     // scan backwards
+    backward_calib_flag_ = true;
     while ((axis_->requested_state_ == Axis::AXIS_STATE_UNDEFINED) && axis_->motor_.is_armed_) {
         bool reached_target_dist = axis_->open_loop_controller_.total_distance_.any().value_or(INFINITY) <= 0.0f;
         if (reached_target_dist) {
@@ -445,6 +471,7 @@ bool Encoder::run_offset_calibration() {
         num_steps++;
         osDelay(1);
     }
+    backward_calib_flag_ = false;
 
     // Motor disarmed because of an error
     if (!axis_->motor_.is_armed_) {
@@ -456,6 +483,47 @@ bool Encoder::run_offset_calibration() {
     config_.phase_offset = encvaluesum / num_steps;
     int32_t residual = encvaluesum - ((int64_t)config_.phase_offset * (int64_t)num_steps);
     config_.phase_offset_float = (float)residual / (float)num_steps + 0.5f;  // add 0.5 to center-align state to phase
+
+    int32_t elec_cpr = (config_.cpr / axis_->motor_.config_.pole_pairs);
+    if (mode_ == MODE_INC_PLUS_HALL)        //计算霍尔传感器相关偏移
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            if (hall_edge_up_sample_cnt_[i] == 0)
+            {
+                enc_hall_calib_err_count_++;
+                break;
+            }            
+            hall_edge_up_enc_cnt_[i] /= hall_edge_up_sample_cnt_[i];
+            hall_edge_down_enc_cnt_[i] /= hall_edge_down_sample_cnt_[i];
+
+            int32_t edge_up_down_diff = mod((hall_edge_up_first_enc_cnt_[i] + hall_edge_up_enc_cnt_[i]) - (hall_edge_down_first_enc_cnt_[i] + hall_edge_down_enc_cnt_[i]) - (elec_cpr / 6), elec_cpr);
+            if (edge_up_down_diff > elec_cpr / 2)
+            {
+                edge_up_down_diff -= elec_cpr;
+            }
+            // 标定成功的判断条件: 正负偏移量均不超过5%
+            if ( edge_up_down_diff > (elec_cpr / 6 / 20) )
+            {
+                enc_hall_calib_err_count_++;
+                break;
+            }
+        } 
+    }
+
+    if (enc_hall_calib_err_count_ == 0)
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            config_.hall_edge_up_cnt_[i] = mod((hall_edge_up_first_enc_cnt_[i] + hall_edge_up_enc_cnt_[i]) - config_.phase_offset, elec_cpr);
+            config_.hall_edge_down_cnt_[i] = mod((hall_edge_down_first_enc_cnt_[i] + hall_edge_down_enc_cnt_[i]) - config_.phase_offset, elec_cpr);
+        }
+        first_scan_hall_edge_ = false;
+    }
+    else
+    {
+        //set_error
+    }
 
     is_ready_ = true;
     return true;
@@ -475,7 +543,8 @@ static bool decode_hall(uint8_t hall_state, int32_t* hall_cnt) {
 
 void Encoder::sample_now() {
     switch (mode_) {
-        case MODE_INCREMENTAL: {
+        case MODE_INCREMENTAL:
+        case MODE_INC_PLUS_HALL: {
             tim_cnt_sample_ = (int16_t)timer_->Instance->CNT;
         } break;
 
@@ -519,9 +588,161 @@ bool Encoder::read_sampled_gpio(Stm32Gpio gpio) {
 }
 
 void Encoder::decode_hall_samples() {
-    hall_state_ = (read_sampled_gpio(hallA_gpio_) ? 1 : 0)
+    uint8_t hall_state_new = (read_sampled_gpio(hallA_gpio_) ? 1 : 0)
                 | (read_sampled_gpio(hallB_gpio_) ? 2 : 0)
                 | (read_sampled_gpio(hallC_gpio_) ? 4 : 0);
+
+    // int32_t hall_cnt;
+    // int32_t last_hall_cnt;
+    // // 获取hall切换时刻的读数
+    // if (hall_state_ != hall_state_new && decode_hall(hall_state_new, &hall_cnt) && decode_hall(hall_state_, &last_hall_cnt) && (forward_calib_flag_ || backward_calib_flag_))
+    // {
+    //     int mod_hall_cnt = mod(hall_cnt - last_hall_cnt, 6);
+    //     size_t edge_idx;
+    //     if (mod_hall_cnt == 1) { // counted up
+    //         hall_edge_up_enc_cnt_[hall_cnt] = count_in_cpr_ % (config_.cpr / axis_->motor_.config_.pole_pairs); // 但这时候count_in_cpr还没更新，后续需要在其他地方继续调用
+    //     } else if (mod_hall_cnt == 5) { // counted down
+    //         hall_edge_down_enc_cnt_[hall_cnt] = count_in_cpr_ % (config_.cpr / axis_->motor_.config_.pole_pairs); // 但这时候count_in_cpr还没更新，后续需要在其他地方继续调用
+    //     } else {
+
+    //     }
+    //     // hall_flip_flag_ = true;//频率太高，调试也用不上
+    //     // hall_phase_flip_enc_cnt_[hall_c] = count_in_cpr_ % (config_.cpr / axis_->motor_.config_.pole_pairs); // 但这时候count_in_cpr还没更新，后续需要在其他地方继续调用
+    // }
+    // else
+    // {
+    //     // hall_flip_flag_ = false;
+    // }
+
+    hall_state_ = hall_state_new;
+    // hall_state_ = (read_sampled_gpio(hallA_gpio_) ? 1 : 0)
+    //             | (read_sampled_gpio(hallB_gpio_) ? 2 : 0)
+    //             | (read_sampled_gpio(hallC_gpio_) ? 4 : 0);
+}
+
+// 调用条件，处于hall + inc 模式时调用
+void Encoder::inc_hall_calib() 
+{
+    int32_t hall_cnt;
+    int32_t last_hall_cnt;
+    // 获取hall切换时刻的读数
+    if (hall_state_ != last_hall_state_ && decode_hall(hall_state_, &hall_cnt) && decode_hall(last_hall_state_, &last_hall_cnt))
+    {
+        int32_t mod_hall_cnt = mod(hall_cnt - last_hall_cnt, 6);
+        int32_t elec_cpr = (config_.cpr / axis_->motor_.config_.pole_pairs);//可能会带来一些误差，但不大
+        int32_t cnt_read = count_in_cpr_ % elec_cpr;
+        int32_t delta_cnt = 0;
+        if (mod_hall_cnt == 1) // counted up
+        { 
+            if (hall_edge_up_sample_cnt_[hall_cnt] == 0)
+            {
+                hall_edge_up_first_enc_cnt_[hall_cnt] = cnt_read;
+            }
+
+            delta_cnt = mod(cnt_read - hall_edge_up_first_enc_cnt_[hall_cnt], elec_cpr);
+            if (delta_cnt > elec_cpr / 2)
+            {
+                delta_cnt -= elec_cpr;
+            }
+
+            hall_edge_up_enc_cnt_[hall_cnt] +=  delta_cnt;
+            hall_edge_up_sample_cnt_[hall_cnt]++;
+
+        } else if (mod_hall_cnt == 5) // counted down
+        { 
+            if (hall_edge_down_sample_cnt_[hall_cnt] == 0)
+            {
+                hall_edge_down_first_enc_cnt_[hall_cnt] = cnt_read;
+            }
+
+            delta_cnt = mod(cnt_read - hall_edge_down_first_enc_cnt_[hall_cnt], elec_cpr);
+            if (delta_cnt > elec_cpr / 2)
+            {
+                delta_cnt -= elec_cpr;
+            }
+
+            hall_edge_down_enc_cnt_[hall_cnt] +=  delta_cnt;
+            hall_edge_down_sample_cnt_[hall_cnt]++;
+        } else 
+        {
+            enc_hall_calib_err_count_++;
+        }
+    }
+    else
+    {
+        // hall_flip_flag_ = false;
+    }
+}
+
+float Encoder::get_phase_by_hall(int32_t hall_cnt)
+{
+    int32_t elec_cpr_cnt;
+    if ( abs(config_.hall_edge_down_cnt_[hall_cnt] - config_.hall_edge_up_cnt_[hall_cnt]) > config_.cpr / axis_->motor_.config_.pole_pairs / 2  )
+    {
+        elec_cpr_cnt = (config_.hall_edge_up_cnt_[hall_cnt] + config_.hall_edge_down_cnt_[hall_cnt] + config_.cpr / axis_->motor_.config_.pole_pairs) / 2;
+    }
+    else
+    {
+        elec_cpr_cnt = (config_.hall_edge_up_cnt_[hall_cnt] + config_.hall_edge_down_cnt_[hall_cnt]) / 2;
+    }
+    float ph = elec_cpr_cnt * axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr));
+    return ph;
+} 
+
+
+// 根据霍尔和增量编码器的偏移，估计当前电角度
+void Encoder::get_phase_by_inc_and_hall(float inc_cnt) 
+{
+    int32_t hall_cnt, last_hall_cnt;
+    float ph = 0;
+    float elec_rad_per_enc = axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr));
+
+    if (first_scan_hall_edge_ == false)
+    {
+        if (!decode_hall(hall_state_, &hall_cnt) || !decode_hall(last_hall_state_, &last_hall_cnt)) // 解码校验
+        {
+            // ph = config_.hall_edge_up_cnt_[hall_cnt] * axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr)); 
+            ph = get_phase_by_hall(hall_cnt);
+            
+            //todo : set error
+        }  
+        else if (hall_state_ != last_hall_state_)// 初次霍尔状态切换，标定位置
+        {
+            int32_t mod_hall_cnt = mod(hall_cnt - last_hall_cnt, 6); 
+            if (mod_hall_cnt == 1) // counted up
+            {
+                hall_enc_offset_float_ = count_in_cpr_ - config_.hall_edge_up_cnt_[hall_cnt];
+                first_scan_hall_edge_ = true;
+            }
+            else if (mod_hall_cnt == 5)
+            {
+                hall_enc_offset_float_ = count_in_cpr_ - config_.hall_edge_down_cnt_[hall_cnt];
+                first_scan_hall_edge_ = true;
+            }
+            else
+            {
+                ph = get_phase_by_hall(hall_cnt);
+            }
+        }
+        else
+        {
+            ph = get_phase_by_hall(hall_cnt);
+        }
+    }
+    
+    if (first_scan_hall_edge_ == true)
+    {
+        // elec_rad_per_enc = axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr));
+        ph = elec_rad_per_enc * (count_in_cpr_ - hall_enc_offset_float_ - 0.5f);
+    }
+
+    phase_ = wrap_pm_pi(ph) * config_.direction;
+    phase_vel_ = (2*M_PI) * *vel_estimate_.present() * axis_->motor_.config_.pole_pairs * config_.direction;
+
+
+    
+    ph = elec_rad_per_enc * (inc_cnt - config_.phase_offset_float);
+    test_phase_ = wrap_pm_pi(ph) * config_.direction;
 }
 
 bool Encoder::abs_spi_start_transaction() {
@@ -656,17 +877,32 @@ bool Encoder::update() {
         case MODE_INCREMENTAL: {
             //TODO: use count_in_cpr_ instead as shadow_count_ can overflow
             //or use 64 bit
-            int16_t delta_enc_16 = (int16_t)tim_cnt_sample_ - (int16_t)shadow_count_;
+            // int16_t delta_enc_16 = (int16_t)tim_cnt_sample_ - (int16_t)shadow_count_;
+            // delta_enc = (int32_t)delta_enc_16; //sign extend
+
+            int16_t delta_enc_16 = (int16_t)tim_cnt_sample_ - (int16_t)last_tim_cnt_sample_;
+            last_tim_cnt_sample_ = tim_cnt_sample_;
             delta_enc = (int32_t)delta_enc_16; //sign extend
         } break;
 
+        case MODE_INC_PLUS_HALL:
+        {
+            // 以编码器数据为准
+            // int16_t delta_enc_16_tmp = (int16_t)tim_cnt_sample_ - (int16_t)shadow_count_;
+            // delta_enc = (int32_t)delta_enc_16_tmp; //sign extend
+            int16_t delta_enc_16 = (int16_t)tim_cnt_sample_ - (int16_t)last_tim_cnt_sample_;
+            last_tim_cnt_sample_ = tim_cnt_sample_;
+            delta_enc = (int32_t)delta_enc_16; //sign extend
+        }
+
         case MODE_HALL: {
+            last_hall_state_ = hall_state_;
             decode_hall_samples();
             if (sample_hall_states_) {
                 states_seen_count_[hall_state_]++;
             }
             if (config_.hall_polarity_calibrated) {
-                int32_t hall_cnt;
+                int32_t& hall_cnt = hall_cnt_;
                 if (decode_hall((hall_state_ ^ config_.hall_polarity), &hall_cnt)) {
                     if (calibrate_hall_phase_) {
                         if (sample_hall_phase_ && last_hall_cnt_.has_value()) {
@@ -679,6 +915,7 @@ bool Encoder::update() {
                                 edge_idx = last_hall_cnt_.value();
                             } else {
                                 set_error(ERROR_ILLEGAL_HALL_STATE);
+                                test_hall_state_fail = 3;
                                 return false;
                             }
 
@@ -702,14 +939,18 @@ bool Encoder::update() {
 
                         return true; // Skip all velocity and phase estimation
                     }
-
-                    delta_enc = hall_cnt - count_in_cpr_;
-                    delta_enc = mod(delta_enc, 6);
-                    if (delta_enc > 3)
-                        delta_enc -= 6;
+                    if (mode_ == MODE_HALL)//也可能是霍尔+编码器组合，此时以编码器为准
+                    {
+                        delta_enc = hall_cnt - count_in_cpr_;
+                        delta_enc = mod(delta_enc, 6);
+                        if (delta_enc > 3)
+                            delta_enc -= 6;
+                    }
+                    
                 } else {
                     if (!config_.ignore_illegal_hall_state) {
                         set_error(ERROR_ILLEGAL_HALL_STATE);
+                        test_hall_state_fail = 4;
                         return false;
                     }
                 }
@@ -761,6 +1002,11 @@ bool Encoder::update() {
     shadow_count_ += delta_enc;
     count_in_cpr_ += delta_enc;
     count_in_cpr_ = mod(count_in_cpr_, config_.cpr);
+
+    if (mode_ == MODE_INC_PLUS_HALL && (forward_calib_flag_ || backward_calib_flag_))
+    {
+        inc_hall_calib();
+    }
 
     if(mode_ & MODE_FLAG_ABS)
         count_in_cpr_ = pos_abs_latched;
@@ -829,12 +1075,21 @@ bool Encoder::update() {
 
     //// compute electrical phase
     //TODO avoid recomputing elec_rad_per_enc every time
-    float elec_rad_per_enc = axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr));
-    float ph = elec_rad_per_enc * (interpolated_enc - config_.phase_offset_float);
+
     
     if (is_ready_) {
-        phase_ = wrap_pm_pi(ph) * config_.direction;
-        phase_vel_ = (2*M_PI) * *vel_estimate_.present() * axis_->motor_.config_.pole_pairs * config_.direction;
+        if (mode_ == MODE_INC_PLUS_HALL)
+        {
+            get_phase_by_inc_and_hall(interpolated_enc);
+        }
+        else
+        {
+            float elec_rad_per_enc = axis_->motor_.config_.pole_pairs * 2 * M_PI * (1.0f / (float)(config_.cpr));
+            float ph = elec_rad_per_enc * (interpolated_enc - config_.phase_offset_float);
+            phase_ = wrap_pm_pi(ph) * config_.direction;
+            phase_vel_ = (2*M_PI) * *vel_estimate_.present() * axis_->motor_.config_.pole_pairs * config_.direction;
+        }
+        
     }
 
     return true;

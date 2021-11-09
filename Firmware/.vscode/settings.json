@@ -31,6 +31,12 @@
         "tuple": "cpp",
         "type_traits": "cpp",
         "typeinfo": "cpp",
-        "algorithm": "cpp"
-    }
+        "algorithm": "cpp",
+        "ios": "cpp",
+        "xutility": "cpp",
+        "cmath": "cpp",
+        "chrono": "cpp"
+    },
+    "cortex-debug.armToolchainPath": "C:\\PROGRAM FILES (X86)\\GNU ARM EMBEDDED TOOLCHAIN\\9 2020-Q2-UPDATE\\BIN",
+    "cortex-debug.openocdPath": "C:\\OPENOCD-20200701-0.10.0\\BIN\\OPENOCD.EXE"
 }

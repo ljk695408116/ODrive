@@ -475,7 +475,7 @@ void Axis::run_state_machine_loop() {
                 task_chain_[pos++] = AXIS_STATE_IDLE;
             } else if (requested_state_ == AXIS_STATE_FULL_CALIBRATION_SEQUENCE) {
                 task_chain_[pos++] = AXIS_STATE_MOTOR_CALIBRATION;
-                if (encoder_.config_.mode == ODriveIntf::EncoderIntf::MODE_HALL)
+                if (encoder_.config_.mode == ODriveIntf::EncoderIntf::MODE_HALL || encoder_.config_.mode == ODriveIntf::EncoderIntf::MODE_INC_PLUS_HALL)
                     task_chain_[pos++] = AXIS_STATE_ENCODER_HALL_POLARITY_CALIBRATION;
                 if (encoder_.config_.use_index)
                     task_chain_[pos++] = AXIS_STATE_ENCODER_INDEX_SEARCH;

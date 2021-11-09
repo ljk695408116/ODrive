@@ -93,21 +93,32 @@ Motor motors[AXIS_COUNT] = {
     }
 };
 
+    // {GPIOC, GPIO_PIN_4}, // GPIO5
+    // {GPIOB, GPIO_PIN_2}, // GPIO6
+    // {GPIOA, GPIO_PIN_15}, // GPIO7
+    // {GPIOB, GPIO_PIN_3}, // GPIO8
+
 Encoder encoders[AXIS_COUNT] = {
     {
         &htim3, // timer
         {M0_ENC_Z_GPIO_Port, M0_ENC_Z_Pin}, // index_gpio
-        {M0_ENC_A_GPIO_Port, M0_ENC_A_Pin}, // hallA_gpio
-        {M0_ENC_B_GPIO_Port, M0_ENC_B_Pin}, // hallB_gpio
-        {M0_ENC_Z_GPIO_Port, M0_ENC_Z_Pin}, // hallC_gpio
+        // {M0_ENC_A_GPIO_Port, M0_ENC_A_Pin}, // hallA_gpio
+        // {M0_ENC_B_GPIO_Port, M0_ENC_B_Pin}, // hallB_gpio
+        // {M0_ENC_Z_GPIO_Port, M0_ENC_Z_Pin}, // hallC_gpio
+        {GPIOB, GPIO_PIN_2}, // GPIO6
+        {GPIOA, GPIO_PIN_15}, // GPIO7
+        {GPIOB, GPIO_PIN_3}, // GPIO8
         &spi3_arbiter // spi_arbiter
     },
     {
         &htim4, // timer
         {M1_ENC_Z_GPIO_Port, M1_ENC_Z_Pin}, // index_gpio
-        {M1_ENC_A_GPIO_Port, M1_ENC_A_Pin}, // hallA_gpio
-        {M1_ENC_B_GPIO_Port, M1_ENC_B_Pin}, // hallB_gpio
-        {M1_ENC_Z_GPIO_Port, M1_ENC_Z_Pin}, // hallC_gpio
+        // {M1_ENC_A_GPIO_Port, M1_ENC_A_Pin}, // hallA_gpio
+        // {M1_ENC_B_GPIO_Port, M1_ENC_B_Pin}, // hallB_gpio
+        // {M1_ENC_Z_GPIO_Port, M1_ENC_Z_Pin}, // hallC_gpio
+        {GPIOA, GPIO_PIN_2}, // GPIO3
+        {GPIOA, GPIO_PIN_3}, // GPIO4
+        {GPIOC, GPIO_PIN_4}, // GPIO5
         &spi3_arbiter // spi_arbiter
     }
 };
@@ -232,14 +243,15 @@ std::array<GpioFunction, 3> alternate_functions[GPIO_COUNT] = {
 #if HW_VERSION_MINOR >= 3
     /* GPIO1: */ {{{ODrive::GPIO_MODE_UART_A, GPIO_AF8_UART4}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
     /* GPIO2: */ {{{ODrive::GPIO_MODE_UART_A, GPIO_AF8_UART4}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
-    /* GPIO3: */ {{{ODrive::GPIO_MODE_UART_B, GPIO_AF7_USART2}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
+    // /* GPIO3: */ {{{ODrive::GPIO_MODE_UART_B, GPIO_AF7_USART2}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
+    /* GPIO3: */ {{}},
 #else
     /* GPIO1: */ {{}},
     /* GPIO2: */ {{}},
     /* GPIO3: */ {{}},
 #endif
-
-    /* GPIO4: */ {{{ODrive::GPIO_MODE_UART_B, GPIO_AF7_USART2}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
+    /* GPIO4: */ {{}},
+    // /* GPIO4: */ {{{ODrive::GPIO_MODE_UART_B, GPIO_AF7_USART2}, {ODrive::GPIO_MODE_PWM, GPIO_AF2_TIM5}}},
     /* GPIO5: */ {{}},
     /* GPIO6: */ {{}},
     /* GPIO7: */ {{}},
@@ -284,9 +296,9 @@ void system_init() {
 
     // Ensure that the board version for which this firmware is compiled matches
     // the board we're running on.
-    if (!check_board_version(otp_ptr)) {
-        for (;;);
-    }
+    // if (!check_board_version(otp_ptr)) {
+    //     for (;;);
+    // }
 }
 
 bool board_init() {
@@ -515,6 +527,10 @@ void TIM8_UP_TIM13_IRQHandler(void) {
     }
 }
 
+float cur0_pha = 0;
+float cur0_phb = 0;
+float cur0_phc = 0;
+
 void ControlLoop_IRQHandler(void) {
     COUNT_IRQ(ControlLoop_IRQn);
     uint32_t timestamp = timestamp_;
@@ -539,6 +555,10 @@ void ControlLoop_IRQHandler(void) {
     if (!(TIM8->BDTR & TIM_BDTR_MOE_Msk)) {
         current1 = {0.0f, 0.0f};
     }
+
+    cur0_pha = current0->phA;
+    cur0_phb = current0->phB;
+    cur0_phc = current0->phC;
 
     motors[0].current_meas_cb(timestamp - TIM1_INIT_COUNT, current0);
     motors[1].current_meas_cb(timestamp, current1);

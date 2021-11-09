@@ -2,6 +2,11 @@
 #include "foc.hpp"
 #include <board.h>
 
+float tmp_cur_iq = 0;
+float tmp_cur_set_iq = 0;
+float tmp_cur_id = 0;
+float tmp_cur_set_id = 0;
+
 Motor::Error AlphaBetaFrameController::on_measurement(
             std::optional<float> vbus_voltage,
             std::optional<std::array<float, 3>> currents,
@@ -111,6 +116,8 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
         Iq_measured_ = 0.0f;
     }
 
+    tmp_cur_iq = Iq_measured_;
+    tmp_cur_id = Id_measured_;
 
     float mod_to_V = (2.0f / 3.0f) * vbus_voltage;
     float V_to_mod = 1.0f / mod_to_V;
@@ -131,6 +138,9 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
         auto [p_gain, i_gain] = *pi_gains_;
         auto [Id, Iq] = *Idq;
         auto [Id_setpoint, Iq_setpoint] = *Idq_setpoint_;
+
+        tmp_cur_set_iq = Iq_setpoint;
+        tmp_cur_set_id = Id_setpoint;
 
         float Ierr_d = Id_setpoint - Id;
         float Ierr_q = Iq_setpoint - Iq;

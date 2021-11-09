@@ -43,7 +43,8 @@ public:
         uint16_t abs_spi_cs_gpio_pin = 1;
         uint16_t sincos_gpio_pin_sin = 3;
         uint16_t sincos_gpio_pin_cos = 4;
-
+        std::array<int, 6> hall_edge_up_cnt_;
+        std::array<int, 6> hall_edge_down_cnt_;
 
         // custom setters
         Encoder* parent = nullptr;
@@ -83,6 +84,10 @@ public:
     int32_t hall_model(float internal_pos);
     bool update();
 
+    void inc_hall_calib();
+    void get_phase_by_inc_and_hall(float inc_cnt);
+    float get_phase_by_hall(int32_t hall_cnt);
+
     TIM_HandleTypeDef* timer_;
     Stm32Gpio index_gpio_;
     Stm32Gpio hallA_gpio_;
@@ -119,16 +124,21 @@ public:
     bool vel_estimate_valid_ = false;
 
     int16_t tim_cnt_sample_ = 0; // 
+    int16_t last_tim_cnt_sample_ = 0;
     static const constexpr GPIO_TypeDef* ports_to_sample[] = { GPIOA, GPIOB, GPIOC };
     uint16_t port_samples_[sizeof(ports_to_sample) / sizeof(ports_to_sample[0])];
     // Updated by low_level pwm_adc_cb
     uint8_t hall_state_ = 0x0; // bit[0] = HallA, .., bit[2] = HallC
+    uint8_t last_hall_state_ = 0x0; 
+    int32_t hall_cnt_;
     std::optional<uint8_t> last_hall_cnt_ = std::nullopt; // Used to find hall edges for calibration
+    // bool hall_flip_flag_ = false;
     bool calibrate_hall_phase_ = false;
     bool sample_hall_states_ = false;
     bool sample_hall_phase_ = false;
     std::array<int, 8> states_seen_count_; // for hall polarity calibration
     std::array<int, 6> hall_phase_calib_seen_count_;
+    std::array<int, 6> hall_phase_flip_enc_cnt_;
 
     float sincos_sample_s_ = 0.0f;
     float sincos_sample_c_ = 0.0f;
@@ -145,6 +155,20 @@ public:
     uint16_t abs_spi_dma_rx_[1];
     Stm32SpiArbiter::SpiTask spi_task_;
 
+    /* 专门用于霍尔标定 */
+    bool forward_calib_flag_ = false;
+    bool backward_calib_flag_ = false;
+    bool first_scan_hall_edge_ = false; // 修正编码器偏移
+    int  enc_hall_calib_err_count_ = 0;
+    std::array<int, 6> hall_edge_up_first_enc_cnt_;     // 提供一个基准，用于环形比较
+    std::array<int, 6> hall_edge_down_first_enc_cnt_;
+    std::array<int, 6> hall_edge_up_enc_cnt_;
+    std::array<int, 6> hall_edge_down_enc_cnt_;
+    std::array<int, 6> hall_edge_up_sample_cnt_;
+    std::array<int, 6> hall_edge_down_sample_cnt_;
+
+    float hall_enc_offset_float_ = 0;
+    float test_phase_ = 0;
     constexpr float getCoggingRatio(){
         return 1.0f / 3600.0f;
     }
