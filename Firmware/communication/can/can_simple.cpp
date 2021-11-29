@@ -319,12 +319,17 @@ bool CANSimple::get_iq_callback(const Axis& axis) {
     if (!Idq_setpoint.has_value()) {
         Idq_setpoint = {0.0f, 0.0f};
     }
+    float set_iq = Idq_setpoint->second;
+    float iq = axis.motor_.current_control_.Iq_measured_;
 
+#if 0
     static_assert(sizeof(float) == sizeof(Idq_setpoint->first));
     static_assert(sizeof(float) == sizeof(Idq_setpoint->second));
     can_setSignal<float>(txmsg, Idq_setpoint->first, 0, 32, true);
     can_setSignal<float>(txmsg, Idq_setpoint->second, 32, 32, true);
-
+#endif
+    can_setSignal<float>(txmsg, set_iq, 0, 32, true);
+    can_setSignal<float>(txmsg, iq, 32, 32, true);
     return canbus_->send_message(txmsg);
 }
 
@@ -375,6 +380,7 @@ uint32_t CANSimple::service_stack() {
                 if ((now - a.can_.last_encoder) >= a.config_.can.encoder_rate_ms) {
                     if (get_encoder_estimates_callback(a))
                         a.can_.last_encoder = now;
+                    get_iq_callback(a);
                 }
 
                 int nextAxisService = a.can_.last_encoder + a.config_.can.encoder_rate_ms - now;
